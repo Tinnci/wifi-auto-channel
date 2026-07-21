@@ -14,7 +14,7 @@ Monitors channel utilization via nl80211 survey data (actual neighbor interferen
 
 ## Install
 
-Add to `feeds.conf`:
+Add to your OpenWrt `feeds.conf`:
 
 ```
 src-git wifi_auto_channel https://github.com/dbankmann/wifi-auto-channel.git
@@ -23,9 +23,9 @@ src-git wifi_auto_channel https://github.com/dbankmann/wifi-auto-channel.git
 ```bash
 ./scripts/feeds update wifi_auto_channel
 ./scripts/feeds install wifi-auto-channel
-# enable in menuconfig: Network -> Wireless -> wifi-auto-channel
-make package/wifi-auto-channel/compile
 ```
+
+Then enable `wifi-auto-channel` in `make menuconfig` under Network -> Wireless and build.
 
 ## Configuration
 
