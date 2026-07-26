@@ -142,8 +142,8 @@ function do_switch(radio_name, phy, target, bw) {
 		params.center_freq1, bw);
 
 	let ret = ubus_conn.call('hostapd', 'switch_channel', params);
-	if (ret === false || ret === null) {
-		log(0, '%s: switch_channel failed', radio_name);
+	if ((ret === false || ret === null) && ubus_conn.error()) {
+		log(0, '%s: switch_channel failed: %s', radio_name, ubus_conn.error());
 		return false;
 	}
 
