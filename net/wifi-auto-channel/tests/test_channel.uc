@@ -6,16 +6,18 @@ import {
 	freq_to_channel, channel_to_freq, htmode_to_bw, get_oper_chwidth,
 	find_channel_group, get_center_freq1, get_groups_for_bw,
 	build_phy_info, is_dfs, is_available, group_available, group_has_dfs,
+	channel_is_dfs,
 	compute_utilization, score_survey_channel, score_channel_group,
-	find_best_channel
+	find_best_channel, find_best_non_dfs_channel
 } from 'wifi-auto-channel.channel';
 
 const mod = {
 	freq_to_channel, channel_to_freq, htmode_to_bw, get_oper_chwidth,
 	find_channel_group, get_center_freq1, get_groups_for_bw,
 	build_phy_info, is_dfs, is_available, group_available, group_has_dfs,
+	channel_is_dfs,
 	compute_utilization, score_survey_channel, score_channel_group,
-	find_best_channel,
+	find_best_channel, find_best_non_dfs_channel,
 };
 
 let passed = 0;
@@ -282,6 +284,39 @@ assert_eq("only option", best_limited?.center_freq1, 5210);
 let best_ht20 = mod.find_best_channel(5180, 20, survey_congested, phy_full, cfg_dfs_yes, []);
 assert_true("HT20 finds channel", best_ht20);
 assert_true("HT20 picks clean freq", best_ht20.score > 50);
+
+printf("=== channel_is_dfs ===\n");
+assert_false("ch36 80MHz not DFS", mod.channel_is_dfs(5180, 80, phy_full));
+assert_true("ch52 80MHz is DFS", mod.channel_is_dfs(5260, 80, phy_full));
+assert_true("ch52 20MHz is DFS", mod.channel_is_dfs(5260, 20, phy_full));
+assert_false("ch36 20MHz not DFS", mod.channel_is_dfs(5180, 20, phy_full));
+
+printf("=== find_best_non_dfs_channel ===\n");
+let best_nd = mod.find_best_non_dfs_channel(5260, 80, survey_all_clean, phy_full, cfg_dfs_yes, []);
+assert_true("finds non-DFS alternative", best_nd);
+assert_eq("picks 36-48 group", best_nd?.center_freq1, 5210);
+assert_false("result group has no DFS", mod.group_has_dfs(best_nd?.group, phy_full));
+
+let best_nd_congested = mod.find_best_non_dfs_channel(5260, 80, survey_congested, phy_full, cfg_dfs_yes, []);
+assert_true("finds non-DFS even when congested", best_nd_congested);
+assert_eq("still picks 36-48 (only non-DFS option)", best_nd_congested?.center_freq1, 5210);
+assert_true("congested non-DFS scores lower",
+	best_nd_congested.score < best_nd.score);
+
+let phy_dfs_only = make_phy_info([
+	{ freq: 5260, radar: true }, { freq: 5280, radar: true },
+	{ freq: 5300, radar: true }, { freq: 5320, radar: true },
+]);
+let best_nd_none = mod.find_best_non_dfs_channel(5260, 80, survey_all_clean, phy_dfs_only, cfg_dfs_yes, []);
+assert_eq("no non-DFS available returns null", best_nd_none, null);
+
+let best_nd_avoided = mod.find_best_non_dfs_channel(5260, 80, survey_all_clean, phy_full, cfg_dfs_yes, [5180]);
+assert_true("avoided still returns group", best_nd_avoided);
+assert_true("avoided penalty applied", best_nd_avoided.score < best_nd.score);
+
+let best_nd_20 = mod.find_best_non_dfs_channel(5260, 20, survey_all_clean, phy_full, cfg_dfs_yes, []);
+assert_true("20MHz finds non-DFS freq", best_nd_20);
+assert_false("20MHz result not DFS", mod.is_dfs(best_nd_20?.freq, phy_full));
 
 printf("\n=== Results ===\n");
 printf("Passed: %d\n", passed);

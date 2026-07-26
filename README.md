@@ -44,9 +44,13 @@ config radio 'radio0'
 	option dfs_allowed '1'
 	option dfs_min_improvement '50'
 	option active_scan '0'
+	option prefer_non_dfs '0'
+	option non_dfs_margin '15'
 ```
 
 The defaults are conservative: 3 checks at 5-minute intervals (15 minutes of sustained >50% utilization) before evaluating, and a 1-hour cooldown between switches. DFS channels require a higher improvement score since CSA to DFS triggers a 60-second CAC.
+
+With `prefer_non_dfs` enabled, the daemon proactively moves off a DFS channel whenever a non-DFS alternative scores within `non_dfs_margin` points of the current channel, regardless of congestion (still subject to the cooldown). This is useful in multi-AP roaming setups: clients cannot actively probe on DFS channels, which breaks 802.11k/v-based steering (usteer, DAWN) and slows down roaming. DFS channels are then only used when the non-DFS spectrum is significantly more congested.
 
 ## Tests
 
@@ -55,7 +59,7 @@ scp net/wifi-auto-channel/tests/test_channel.uc root@router:/tmp/
 ssh root@router ucode /tmp/test_channel.uc
 ```
 
-87 tests covering channel math, scoring, DFS detection across different regulatory domains, and best-channel selection.
+102 tests covering channel math, scoring, DFS detection across different regulatory domains, and best-channel selection.
 
 ## Tested on
 

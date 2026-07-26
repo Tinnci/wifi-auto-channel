@@ -9,9 +9,9 @@ import * as nl80211 from 'nl80211';
 import * as fs from 'fs';
 import {
 	freq_to_channel, htmode_to_bw, get_oper_chwidth, get_center_freq1,
-	build_phy_info, is_dfs, find_channel_group,
+	build_phy_info, is_dfs, find_channel_group, channel_is_dfs,
 	compute_utilization, score_survey_channel, score_channel_group,
-	find_best_channel
+	find_best_channel, find_best_non_dfs_channel
 } from 'wifi-auto-channel.channel';
 
 const NL = nl80211.const;
@@ -231,6 +231,8 @@ function load_config() {
 			dfs_allowed: +(s.dfs_allowed ?? 1),
 			dfs_min_improvement: +(s.dfs_min_improvement ?? 50),
 			active_scan: +(s.active_scan ?? 0),
+			prefer_non_dfs: +(s.prefer_non_dfs ?? 0),
+			non_dfs_margin: +(s.non_dfs_margin ?? 15),
 		};
 	});
 
@@ -336,6 +338,41 @@ function main() {
 				s.consecutive_high++;
 			else
 				s.consecutive_high = 0;
+
+			if (rc.prefer_non_dfs &&
+			    channel_is_dfs(chan_info.freq, s.hw.bw, s.hw.phy_info) &&
+			    time() - s.last_switch >= rc.cooldown) {
+				let survey = get_survey(s.primary_iface);
+				if (length(keys(survey))) {
+					let phy_info = s.hw.phy_info;
+					let bw = s.hw.bw;
+					let current_group = find_channel_group(chan_info.freq, bw);
+					let current_score = current_group
+						? score_channel_group(current_group, survey, chan_info.freq, phy_info, rc)
+						: score_survey_channel(chan_info.freq, survey[chan_info.freq], chan_info.freq, phy_info);
+
+					let best = find_best_non_dfs_channel(chan_info.freq, bw, survey, phy_info, rc, s.avoided);
+					if (best && best.score >= current_score - rc.non_dfs_margin) {
+						log(1, '%s: on DFS ch=%d (score=%.1f), non-DFS ch=%d (score=%.1f) within margin %d, switching off DFS',
+							name, freq_to_channel(chan_info.freq), current_score,
+							freq_to_channel(best.freq), best.score, rc.non_dfs_margin);
+
+						if (do_switch(name, s.hw.phy, best, bw)) {
+							s.last_switch = time();
+							s.consecutive_high = 0;
+							s.samples = [];
+							s.prev_survey = null;
+							continue;
+						}
+					} else if (best) {
+						log(2, '%s: staying on DFS ch=%d, best non-DFS ch=%d score gap %.1f exceeds margin %d',
+							name, freq_to_channel(chan_info.freq),
+							freq_to_channel(best.freq), current_score - best.score, rc.non_dfs_margin);
+					} else {
+						log(2, '%s: on DFS channel but no non-DFS alternative available', name);
+					}
+				}
+			}
 
 			if (s.consecutive_high < rc.sustained_count)
 				continue;

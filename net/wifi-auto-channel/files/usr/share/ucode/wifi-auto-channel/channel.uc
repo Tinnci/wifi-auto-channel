@@ -130,6 +130,13 @@ export function group_has_dfs(group, phy_info) {
 	return false;
 };
 
+export function channel_is_dfs(freq, bw, phy_info) {
+	let g = find_channel_group(freq, bw);
+	if (g)
+		return group_has_dfs(g, phy_info);
+	return is_dfs(freq, phy_info);
+};
+
 export function compute_utilization(prev, curr) {
 	let dt = curr.time - prev.time;
 	if (dt <= 0) return 0;
@@ -196,6 +203,65 @@ export function find_best_channel(current_freq, bw, survey, phy_info, config, av
 	for (let g in groups) {
 		let s = score_channel_group(g, survey, current_freq, phy_info, config);
 		if (s < 0) continue;
+
+		if (index(avoided, g.freqs[0]) >= 0)
+			s -= 20;
+
+		if (s > best_score) {
+			best_score = s;
+			best_group = g;
+		}
+	}
+
+	if (!best_group) return null;
+
+	let best_primary = best_group.freqs[0];
+	let best_primary_score = -1;
+	for (let freq in best_group.freqs) {
+		let s = score_survey_channel(freq, survey[freq], current_freq, phy_info);
+		if (s > best_primary_score) {
+			best_primary_score = s;
+			best_primary = freq;
+		}
+	}
+
+	return {
+		freq: best_primary,
+		center_freq1: best_group.center,
+		score: best_score,
+		group: best_group,
+	}
+};
+
+export function find_best_non_dfs_channel(current_freq, bw, survey, phy_info, config, avoided) {
+	let groups = get_groups_for_bw(bw);
+
+	if (!groups) {
+		let best = null;
+		for (let freq_str in keys(survey)) {
+			let freq = +freq_str;
+			if (!is_available(freq, phy_info)) continue;
+			if (is_dfs(freq, phy_info)) continue;
+			let s = score_survey_channel(freq, survey[freq], current_freq, phy_info);
+			if (index(avoided, freq) >= 0)
+				s -= 20;
+			if (!best || s > best.score)
+				best = { freq, score: s };
+		}
+		return best;
+	}
+
+	let best_group = null;
+	let best_score = -1;
+
+	for (let g in groups) {
+		if (!group_available(g, phy_info)) continue;
+		if (group_has_dfs(g, phy_info)) continue;
+
+		let s = 0;
+		for (let freq in g.freqs)
+			s += score_survey_channel(freq, survey[freq], current_freq, phy_info);
+		s = s / length(g.freqs);
 
 		if (index(avoided, g.freqs[0]) >= 0)
 			s -= 20;
