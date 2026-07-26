@@ -10,6 +10,7 @@ import * as fs from 'fs';
 import {
 	freq_to_channel, htmode_to_bw, get_oper_chwidth, get_center_freq1,
 	build_phy_info, is_dfs, find_channel_group, channel_is_dfs,
+	parse_phy_freq_line,
 	compute_utilization, score_survey_channel, score_channel_group,
 	find_best_channel, find_best_non_dfs_channel
 } from 'wifi-auto-channel.channel';
@@ -36,25 +37,9 @@ function get_phy_freqs(phy_name) {
 
 	let line;
 	while ((line = pipe.read('line')) != null) {
-		let m = match(line, /\* (\d+)\.\d+ MHz \[(\d+)\].*?(\(.*\))?/);
-		if (!m) continue;
-
-		let freq = +m[1];
-		let flags = m[3] ?? '';
-		let entry = { freq: freq };
-
-		if (index(flags, 'disabled') >= 0)
-			entry.disabled = true;
-		if (index(flags, 'radar detection') >= 0)
-			entry.radar = true;
-		if (index(flags, 'no IR') >= 0)
-			entry.no_ir = true;
-
-		let pm = match(line, /\((\d+\.\d+) dBm\)/);
-		if (pm)
-			entry.max_power = +pm[1];
-
-		push(freqs, entry);
+		let entry = parse_phy_freq_line(line);
+		if (entry)
+			push(freqs, entry);
 	}
 	pipe.close();
 	return length(freqs) ? freqs : null;

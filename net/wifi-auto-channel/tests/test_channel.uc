@@ -6,7 +6,7 @@ import {
 	freq_to_channel, channel_to_freq, htmode_to_bw, get_oper_chwidth,
 	find_channel_group, get_center_freq1, get_groups_for_bw,
 	build_phy_info, is_dfs, is_available, group_available, group_has_dfs,
-	channel_is_dfs,
+	channel_is_dfs, parse_phy_freq_line,
 	compute_utilization, score_survey_channel, score_channel_group,
 	find_best_channel, find_best_non_dfs_channel
 } from 'wifi-auto-channel.channel';
@@ -15,7 +15,7 @@ const mod = {
 	freq_to_channel, channel_to_freq, htmode_to_bw, get_oper_chwidth,
 	find_channel_group, get_center_freq1, get_groups_for_bw,
 	build_phy_info, is_dfs, is_available, group_available, group_has_dfs,
-	channel_is_dfs,
+	channel_is_dfs, parse_phy_freq_line,
 	compute_utilization, score_survey_channel, score_channel_group,
 	find_best_channel, find_best_non_dfs_channel,
 };
@@ -284,6 +284,34 @@ assert_eq("only option", best_limited?.center_freq1, 5210);
 let best_ht20 = mod.find_best_channel(5180, 20, survey_congested, phy_full, cfg_dfs_yes, []);
 assert_true("HT20 finds channel", best_ht20);
 assert_true("HT20 picks clean freq", best_ht20.score > 50);
+
+printf("=== parse_phy_freq_line ===\n");
+let pl1 = mod.parse_phy_freq_line("			* 5180.0 MHz [36] (23.0 dBm)");
+assert_eq("plain freq", pl1?.freq, 5180);
+assert_false("plain not radar", pl1?.radar);
+assert_eq("plain power", pl1?.max_power, 23);
+
+let pl2 = mod.parse_phy_freq_line("			* 5500.0 MHz [100] (25.0 dBm) (radar detection)");
+assert_eq("radar freq", pl2?.freq, 5500);
+assert_true("radar flag", pl2?.radar);
+assert_eq("radar power", pl2?.max_power, 25);
+
+let pl3 = mod.parse_phy_freq_line("			* 5905.0 MHz [181] (disabled)");
+assert_eq("disabled freq", pl3?.freq, 5905);
+assert_true("disabled flag", pl3?.disabled);
+
+let pl4 = mod.parse_phy_freq_line("			* 5260.0 MHz [52] (24.0 dBm) (no IR, radar detection)");
+assert_true("no IR flag", pl4?.no_ir);
+assert_true("no IR + radar", pl4?.radar);
+
+assert_eq("non-freq line", mod.parse_phy_freq_line("		Band 1:"), null);
+
+let pi_parsed = mod.build_phy_info([
+	mod.parse_phy_freq_line("* 5180.0 MHz [36] (23.0 dBm)"),
+	mod.parse_phy_freq_line("* 5660.0 MHz [132] (25.0 dBm) (radar detection)"),
+]);
+assert_true("parsed ch132 is DFS", mod.is_dfs(5660, pi_parsed));
+assert_false("parsed ch36 not DFS", mod.is_dfs(5180, pi_parsed));
 
 printf("=== channel_is_dfs ===\n");
 assert_false("ch36 80MHz not DFS", mod.channel_is_dfs(5180, 80, phy_full));

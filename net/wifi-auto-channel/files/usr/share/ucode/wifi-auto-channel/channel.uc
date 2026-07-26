@@ -87,6 +87,26 @@ export function get_center_freq1(freq, bw) {
 	return freq;
 };
 
+export function parse_phy_freq_line(line) {
+	let m = match(line, /\* (\d+)\.\d+ MHz \[(\d+)\]/);
+	if (!m) return null;
+
+	let entry = { freq: +m[1] };
+
+	if (index(line, 'disabled') >= 0)
+		entry.disabled = true;
+	if (index(line, 'radar detection') >= 0)
+		entry.radar = true;
+	if (index(line, 'no IR') >= 0)
+		entry.no_ir = true;
+
+	let pm = match(line, /\((\d+)\.\d+ dBm\)/);
+	if (pm)
+		entry.max_power = +pm[1];
+
+	return entry;
+};
+
 export function build_phy_info(available_freqs) {
 	let info = {
 		freqs: {},
