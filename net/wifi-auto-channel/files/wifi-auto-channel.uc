@@ -437,9 +437,9 @@ function main() {
 		t.set(min_interval * 1000);
 	}
 
-	t = uloop.timer(min_interval * 1000, check_channels);
+	t = uloop.timer(30 * 1000, check_channels);
 
-	log(1, 'wifi-auto-channel started, check interval=%ds', min_interval);
+	log(1, 'wifi-auto-channel started, first check in 30s, check interval=%ds', min_interval);
 	uloop.run();
 }
 
