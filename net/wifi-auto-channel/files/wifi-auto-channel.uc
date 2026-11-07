@@ -7,6 +7,7 @@ import { cursor as uci_cursor } from 'uci';
 import * as uloop from 'uloop';
 import * as nl80211 from 'nl80211';
 import * as fs from 'fs';
+import { vacant_ready, valid_sample, usable_survey } from 'wifi-auto-channel.policy';
 import {
 	freq_to_channel, htmode_to_bw, get_oper_chwidth, get_center_freq1,
 	build_phy_info, is_dfs, find_channel_group, channel_is_dfs,
@@ -56,15 +57,18 @@ function discover_radios() {
 
 		let phy = null;
 		let ifaces = [];
+		let has_station = false;
 		for (let iface in (r.interfaces ?? [])) {
 			let ifname = iface.ifname;
-			if (ifname && match(ifname, /^phy\d/)) {
+			if (iface.config?.mode == 'sta' || (ifname && match(ifname, /-sta[0-9]+$/)))
+				has_station = true;
+			if (ifname && match(ifname, /^phy[0-9]+-ap[0-9]+$/)) {
 				if (!phy)
 					phy = replace(ifname, /(-ap\d+|-sta\d+)$/, '');
 				push(ifaces, ifname);
 			}
 		}
-		if (!phy || !length(ifaces)) continue;
+		if (!phy || !length(ifaces) || has_station) continue;
 
 		let phy_freqs = get_phy_freqs(phy);
 		let phy_info = phy_freqs ? build_phy_info(phy_freqs) : null;
@@ -112,6 +116,7 @@ function get_channel_info(phy_iface) {
 		freq: status.freq,
 		channel: status.channel,
 		cac_active: status.dfs?.cac_active ?? false,
+		enabled: status.status == 'ENABLED',
 	};
 }
 
@@ -128,32 +133,68 @@ function get_current_utilization(ifname, freq) {
 	};
 }
 
-function do_switch(radio_name, phy, target, bw) {
+function client_count(ifaces) {
+	let count = 0;
+	for (let iface in ifaces) {
+		let status = ubus_conn.call('hostapd.' + iface, 'get_clients');
+		if (!status || type(status.clients) != 'object')
+			return null;
+		count += length(keys(status.clients));
+	}
+	return count;
+}
+
+function do_switch(radio_name, state, target, bw) {
+	if (client_count(state.hw.ifaces) !== 0) {
+		state.vacant_since = null;
+		log(1, '%s: channel change deferred, clients present or status unavailable', radio_name);
+		return false;
+	}
+	let previous = get_channel_info(state.primary_iface);
+	if (!previous || previous.cac_active)
+		return false;
 	let params = {
-		phy: phy,
+		phy: state.hw.phy,
 		frequency: target.freq,
 		center_freq1: target.center_freq1 ?? get_center_freq1(target.freq, bw),
 		oper_chwidth: get_oper_chwidth(bw),
 		csa_count: 10,
 	};
-
-	log(1, '%s: switching to channel %d (%d MHz), center=%d, bw=%d',
-		radio_name, freq_to_channel(target.freq), target.freq,
-		params.center_freq1, bw);
-
-	let ret = ubus_conn.call('hostapd', 'switch_channel', params);
-	if ((ret === false || ret === null) && ubus_conn.error()) {
-		log(0, '%s: switch_channel failed: %s', radio_name, ubus_conn.error());
+	let result = ubus_conn.call('hostapd', 'switch_channel', params);
+	if ((result === false || result === null) && ubus_conn.error()) {
+		log(0, '%s: channel switch rejected: %s', radio_name, ubus_conn.error());
 		return false;
 	}
-
-	log(1, '%s: channel switch initiated', radio_name);
-	return true;
+	// Validate the result before recording a successful optimization.
+	sleep(3000);
+	let current = get_channel_info(state.primary_iface);
+	if (current && current.enabled && current.freq == target.freq) {
+		fs.writefile('/tmp/wifi-auto-channel/' + radio_name + '.last-switch', '' + time());
+		log(1, '%s: channel switch verified, channel=%d', radio_name, freq_to_channel(target.freq));
+		return true;
+	}
+	params.frequency = previous.freq;
+	params.center_freq1 = get_center_freq1(previous.freq, bw);
+	ubus_conn.call('hostapd', 'switch_channel', params);
+	state.last_switch = time();
+	fs.writefile('/tmp/wifi-auto-channel/' + radio_name + '.last-switch', '' + state.last_switch);
+	sleep(3000);
+	let restored = get_channel_info(state.primary_iface);
+	log(0, '%s: switch verification failed, rollback_verified=%s, cooldown active',
+		radio_name, restored && restored.enabled && restored.freq == previous.freq ? 'yes' : 'no');
+	return false;
 }
 
-function trigger_active_scan(ifname) {
-	log(2, 'triggering active scan on %s', ifname);
-	system(['iw', 'dev', ifname, 'scan', 'trigger']);
+function scan_vacant_radio(state) {
+	if (client_count(state.hw.ifaces) !== 0)
+		return false;
+	// iw waits for scan completion. timeout bounds a missing firmware response.
+	let result = system(['sh', '-c', 'timeout 15 iw dev "$1" scan passive >/dev/null 2>&1', 'scan', state.primary_iface]);
+	if (result != 0) {
+		log(0, '%s: scan failed or timed out, retaining current channel', state.hw.phy);
+		return false;
+	}
+	return client_count(state.hw.ifaces) === 0;
 }
 
 function load_history(radio_name) {
@@ -215,7 +256,8 @@ function load_config() {
 			cooldown: +(s.cooldown ?? 3600),
 			dfs_allowed: +(s.dfs_allowed ?? 1),
 			dfs_min_improvement: +(s.dfs_min_improvement ?? 50),
-			active_scan: +(s.active_scan ?? 0),
+			idle_seconds: max(300, +(s.idle_seconds ?? 300)),
+			channels: split(s.channels ?? '1 6 11', ' '),
 			prefer_non_dfs: +(s.prefer_non_dfs ?? 0),
 			non_dfs_margin: +(s.non_dfs_margin ?? 15),
 		};
@@ -252,6 +294,10 @@ function main() {
 		}
 
 		let hw = hw_radios[name];
+		if (hw.band != '2g' || hw.bw != 20) {
+			log(0, '%s: vacancy policy currently requires a 2.4 GHz HE20/HT20 AP', name);
+			continue;
+		}
 		let primary_iface = hw.ifaces[0];
 		let chan_info = get_channel_info(primary_iface);
 		let prev_survey = chan_info ? get_current_utilization(primary_iface, chan_info.freq) : null;
@@ -266,7 +312,11 @@ function main() {
 			primary_iface: primary_iface,
 			samples: [],
 			prev_survey: prev_survey,
-			last_switch: 0,
+			last_switch: +(fs.readfile('/tmp/wifi-auto-channel/' + name + '.last-switch') ?? 0),
+			vacant_since: null,
+			last_observed: null,
+			next_check: 0,
+			was_vacant: null,
 			avoided: [],
 			history: load_history(name),
 			consecutive_high: 0,
@@ -278,17 +328,43 @@ function main() {
 		exit(0);
 	}
 
-	let min_interval = 300;
-	for (let name in state)
-		if (state[name].config.check_interval < min_interval)
-			min_interval = state[name].config.check_interval;
+	// Check vacancy every 30 seconds, evaluate congestion at each radio's interval.
+	let min_interval = 30;
+	fs.mkdir('/tmp/wifi-auto-channel');
 
 	let t;
 
 	function check_channels() {
+		let current_radios = discover_radios();
 		for (let name in state) {
 			let s = state[name];
 			let rc = s.config;
+			let current_radio = current_radios[name];
+			if (!current_radio || current_radio.band != '2g' || current_radio.bw != 20) {
+				s.vacant_since = null;
+				s.last_observed = null;
+				continue;
+			}
+			if (join(',', current_radio.ifaces) != join(',', s.hw.ifaces))
+				s.vacant_since = null;
+			s.hw = current_radio;
+			s.primary_iface = current_radio.ifaces[0];
+			let observed_at = time();
+			let clients = client_count(s.hw.ifaces);
+			let ready = vacant_ready(s, clients, observed_at, rc.idle_seconds);
+			if (ready != s.was_vacant) {
+				log(1, '%s: vacancy_ready=%s clients=%J required_idle=%ds',
+					name, ready ? 'yes' : 'no', clients, rc.idle_seconds);
+				s.was_vacant = ready;
+			}
+			if (!ready) {
+				s.consecutive_high = 0;
+				s.prev_survey = null;
+				continue;
+			}
+			if (observed_at < s.next_check)
+				continue;
+			s.next_check = observed_at + max(60, rc.check_interval);
 
 			let chan_info = get_channel_info(s.primary_iface);
 			if (!chan_info || chan_info.cac_active) {
@@ -297,14 +373,21 @@ function main() {
 			}
 
 			let cur_survey = get_current_utilization(s.primary_iface, chan_info.freq);
-			if (!cur_survey) {
+			if (!valid_sample(cur_survey)) {
 				log(2, '%s: no survey data for freq %d', name, chan_info.freq);
 				continue;
 			}
 
 			let util_pct = 0;
-			if (s.prev_survey)
+			if (s.prev_survey) {
 				util_pct = compute_utilization(s.prev_survey, cur_survey);
+				if (util_pct < 0 || util_pct > 100) {
+					s.prev_survey = cur_survey;
+					s.consecutive_high = 0;
+					log(1, '%s: invalid survey delta, retaining current channel', name);
+					continue;
+				}
+			}
 			s.prev_survey = cur_survey;
 
 			update_history(name, s.history, util_pct);
@@ -342,7 +425,7 @@ function main() {
 							name, freq_to_channel(chan_info.freq), current_score,
 							freq_to_channel(best.freq), best.score, rc.non_dfs_margin);
 
-						if (do_switch(name, s.hw.phy, best, bw)) {
+						if (do_switch(name, s, best, bw)) {
 							s.last_switch = time();
 							s.consecutive_high = 0;
 							s.samples = [];
@@ -372,12 +455,13 @@ function main() {
 			log(1, '%s: utilization sustained above %d%% for %d checks, evaluating alternatives',
 				name, rc.util_threshold, s.consecutive_high);
 
-			if (rc.active_scan)
-				trigger_active_scan(s.primary_iface);
+			if (!scan_vacant_radio(s))
+				continue;
 
-			let survey = get_survey(s.primary_iface);
-			if (!length(keys(survey))) {
-				log(0, '%s: no survey data available', name);
+			let frequencies = map(rc.channels, (channel) => 2407 + (+channel) * 5);
+			let survey = usable_survey(get_survey(s.primary_iface), frequencies);
+			if (!survey) {
+				log(1, '%s: incomplete or uniformly saturated survey, channel change deferred', name);
 				continue;
 			}
 
@@ -419,7 +503,7 @@ function main() {
 				continue;
 			}
 
-			if (do_switch(name, s.hw.phy, best, bw)) {
+			if (do_switch(name, s, best, bw)) {
 				s.last_switch = now;
 				s.consecutive_high = 0;
 				s.samples = [];
@@ -443,4 +527,7 @@ function main() {
 	uloop.run();
 }
 
-main();
+if (ARGV[0] == '--check')
+	printf('wifi-auto-channel imports and syntax valid\n');
+else
+	main();

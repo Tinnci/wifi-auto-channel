@@ -1,4 +1,25 @@
-# wifi-auto-channel
+# wifi-auto-channel — AX5 vacancy-aware fork
+
+This fork adapts [dbankmann/wifi-auto-channel](https://github.com/dbankmann/wifi-auto-channel) at commit `ea358afc34284cacb58bb400435b7c06e5b278dd` for the Redmi AX5 JDCloud experimental router.
+
+## AX5 profile
+
+- Only 2.4 GHz 20 MHz AP radios are eligible. Radios with a station uplink are excluded.
+- Default enabled radio is `radio1`. `radio0` is disabled in this controller.
+- Poll every 30 seconds. Require five minutes of observed zero clients across all AP interfaces before evaluating congestion. Missing client state resets the wait.
+- Check congestion every five minutes after vacancy. Require three high-utilization samples, a 30-point score improvement and a one-hour cooldown.
+- Candidate channels are 1, 6 and 11. Current regulatory permissions still apply.
+- Wait for a bounded passive scan to complete, then check client presence again before switching.
+- Defer changes on missing/invalid measurements or uniformly saturated candidate surveys.
+- Validate CSA completion. On failed verification, request rollback and enter cooldown.
+
+The service runs under procd. Configuration is `/etc/config/wifi-auto-channel`, and diagnostics appear in `logread -e wifi-auto-channel`.
+
+Tested on the live AX5 with ath11k/NSS using 115 upstream channel tests and 26 additional vacancy/survey tests. The initial five-minute vacancy transition was observed. Long-term optimization performance and client continuity through CSA remain unmeasured. Approximately 99% busy survey readings on this AX5 are still under investigation. The controller defers changing channels when all candidates report saturation.
+
+The OpenWrt package build runs both ucode test suites using the host ucode dependency. Packaging tests can also be run with `python3 -m unittest discover -s net/wifi-auto-channel/tests -v`.
+
+## Upstream project description
 
 OpenWrt picks a WiFi channel once at boot and never changes it. If neighbors start congesting your channel weeks later, you're stuck until you reboot. Enterprise APs from Ubiquiti or Cisco have proprietary auto-channel features, but there's nothing in the open-source WiFi stack -- no `acs_recalc` in hostapd, no periodic re-evaluation, nothing. This package fills that gap.
 
@@ -17,7 +38,7 @@ Monitors channel utilization via nl80211 survey data (actual neighbor interferen
 Add to your OpenWrt `feeds.conf`:
 
 ```
-src-git wifi_auto_channel https://github.com/dbankmann/wifi-auto-channel.git
+src-git wifi_auto_channel https://github.com/Tinnci/wifi-auto-channel.git
 ```
 
 ```bash
@@ -35,17 +56,19 @@ config global 'global'
 	option log_level '1'
 
 config radio 'radio0'
+	option enabled '0'
+
+config radio 'radio1'
 	option enabled '1'
 	option check_interval '300'
+	option idle_seconds '300'
+	option channels '1 6 11'
 	option util_threshold '50'
 	option sustained_count '3'
 	option improvement_threshold '30'
 	option cooldown '3600'
-	option dfs_allowed '1'
-	option dfs_min_improvement '50'
-	option active_scan '0'
+	option dfs_allowed '0'
 	option prefer_non_dfs '0'
-	option non_dfs_margin '15'
 ```
 
 The defaults are conservative: 3 checks at 5-minute intervals (15 minutes of sustained >50% utilization) before evaluating, and a 1-hour cooldown between switches. DFS channels require a higher improvement score since CSA to DFS triggers a 60-second CAC.
